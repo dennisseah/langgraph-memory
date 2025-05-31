@@ -1,4 +1,5 @@
 import random
+from datetime import datetime, timezone
 from typing import Literal
 
 from langchain_core.runnables import RunnableConfig
@@ -9,10 +10,12 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command, interrupt
 
 from langgraph_memory.hosting import container
+from langgraph_memory.models.chat_message import ChatMessage
 from langgraph_memory.protocols.i_azure_openai_service import IAzureOpenAIService
+from langgraph_memory.protocols.i_memory_store import IMemoryStore
 
 llm = container[IAzureOpenAIService].get_model()
-# memory_store = container[IMemoryStore]
+memory_store = container[IMemoryStore]
 
 
 def get_lucky_number(city: str) -> int:
@@ -25,8 +28,8 @@ number_picker = create_react_agent(
     tools=[get_lucky_number],
     prompt=(
         "You are a lucky number picker agent. You are tasked to provide a lucky number "
-        "from 1 to a number that the user provides. User may also ask you to list the "
-        "lucky numbers that you have provided so far. "
+        "between 1 and a number that the user provides. User may also ask you to list "
+        "the lucky numbers that you have provided so far."
     ),
 )
 
@@ -51,21 +54,22 @@ def setup(thread_id: str) -> tuple[CompiledStateGraph, MemorySaver]:
     # We'll always start with a general travel advisor.
     builder.add_edge(START, "number_picker")
 
-    #    checkpointer = memory_store.restore(thread_id)
-    checkpointer = MemorySaver()  # create a new memory saver instance each time
+    # restore the memory from the store
+    checkpointer = memory_store.restore(thread_id)
     graph = builder.compile(checkpointer=checkpointer)
     return graph, checkpointer
 
 
 def serve(thread_id: str, input_message: str) -> str:
-    # history = [
-    #     ChatMessage(
-    #         message=input_message,
-    #         type="user",
-    #         domain="demo",
-    #         ts=datetime.now(timezone.utc).timestamp(),
-    #     )
-    # ]
+    # capture the user input in history
+    history = [
+        ChatMessage(
+            message=input_message,
+            role="user",
+            domain="demo",
+            ts=datetime.now(timezone.utc).timestamp(),
+        )
+    ]
 
     graph, checkpointer = setup(thread_id)
     thread_config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
@@ -81,13 +85,19 @@ def serve(thread_id: str, input_message: str) -> str:
                     last_message = value["messages"][-1]
                     if isinstance(last_message, dict) or last_message.type != "ai":
                         continue
-                    # history.append(
-                    #     ChatMessage(
-                    #         message=last_message.content,
-                    #         type="ai",
-                    #         domain="demo",
-                    #         ts=datetime.now(timezone.utc).timestamp(),
-                    #     )
-                    # )
-                    # memory_store.put(thread_id, history, checkpointer)
+
+                    # capture the ai input in history
+                    history.append(
+                        ChatMessage(
+                            message=last_message.content,
+                            role="ai",
+                            domain="demo",
+                            ts=datetime.now(timezone.utc).timestamp(),
+                        )
+                    )
+
+                    # store the updated history and memory
+                    memory_store.put(thread_id, history, checkpointer)
+
+                    # return the last AI message content to main.py
                     return last_message.content
